@@ -1,0 +1,38 @@
+// Prisma schema for Amino Acid Code Sequence Analyzer
+// Migrated from Laravel MySQL to Supabase PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Protein {
+  id              Int    @id @default(autoincrement())
+  locus           String @db.VarChar(250)
+  speciesNumber   String @map("species_number") @db.VarChar(75)
+  speciesName     String @map("species_name") @db.VarChar(75)
+  accessionNumber String @map("accession_number") @db.VarChar(75)
+  proteinSequence String @map("protein_sequence") @db.VarChar(2000)
+  proteinLength   Int    @map("protein_length")
+
+  @@map("proteins")
+}
+
+model MiniMotif {
+  id              Int    @id @default(autoincrement())
+  motifPattern    String @map("motif_pattern") @db.VarChar(75)
+  actualMotif     String @map("actual_motif") @db.VarChar(1500)
+  accessionNumber String @map("accession_number") @db.VarChar(75)
+  speciesName     String @map("species_name") @db.VarChar(75)
+  proteinLength   Int    @map("protein_length")
+  motifLength     Int    @map("motif_length")
+  startPosition   Int    @map("start_position")
+  endPosition     Int    @map("end_position")
+
+  @@map("mini_motifs")
+}
