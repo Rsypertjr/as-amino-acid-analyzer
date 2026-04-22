@@ -65,6 +65,7 @@ export default function AminoAnalyzer({
   );
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -90,6 +91,15 @@ export default function AminoAnalyzer({
     setMotifAnalytic(val);
     setMotifAnalyticIndex(PROTEIN_ANALYTICS.indexOf(val));
   };
+
+  const handleCancelBuild = useCallback(async () => {
+    setCancelling(true);
+    try {
+      await fetch("/api/cancel-build", { method: "POST" });
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const handleBuildDatabase = useCallback(
     async (fileName: string) => {
@@ -130,6 +140,7 @@ export default function AminoAnalyzer({
       const result = await res.json();
 
       stopPolling();
+      setCancelling(false);
       setStatusMessage(result.message);
 
       if (result.success) {
@@ -227,7 +238,9 @@ export default function AminoAnalyzer({
             onBuild={handleBuildDatabase}
             onDrop={handleDropTables}
             onUpdate={handleUpdateStatus}
+            onCancel={handleCancelBuild}
             loading={loading}
+            cancelling={cancelling}
           />
         </div>
 
@@ -333,12 +346,16 @@ function FileInputForm({
   onBuild,
   onDrop,
   onUpdate,
+  onCancel,
   loading,
+  cancelling,
 }: {
   onBuild: (fileName: string) => void;
   onDrop: () => void;
   onUpdate: () => void;
+  onCancel: () => void;
   loading: boolean;
+  cancelling: boolean;
 }) {
   const [fileName, setFileName] = useState("");
 
@@ -374,6 +391,15 @@ function FileInputForm({
         >
           Update Database Status
         </button>
+        {loading && (
+          <button
+            onClick={onCancel}
+            disabled={cancelling}
+            className="bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-orange-700 disabled:opacity-50 transition-colors"
+          >
+            {cancelling ? "Cancelling..." : "Stop Build"}
+          </button>
+        )}
       </div>
     </div>
   );

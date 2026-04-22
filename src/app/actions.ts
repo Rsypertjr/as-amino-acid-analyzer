@@ -35,7 +35,7 @@ export interface SearchResult {
 export interface BuildProgress {
   proteinRows: number;
   miniMotifRows: number;
-  phase: "idle" | "proteins" | "minimotifs" | "done";
+  phase: "idle" | "proteins" | "minimotifs" | "done" | "cancelled";
 }
 
 // ──────────────────────────────────────────────
@@ -229,11 +229,27 @@ export async function buildDatabase(
     speciesMatches.length
   );
 
+  // Guard: no sequences parsed means the file is invalid or unreadable
+  if (numSeqs === 0) {
+    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS proteins`);
+    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS mini_motifs`);
+    return {
+      success: false,
+      message: "No valid protein sequences found in the FASTA file. Tables were not built.",
+    };
+  }
+
   // Insert proteins in batches of 50
   buildProgress.reset();
   buildProgress.phase = "proteins";
 
   for (let i = 0; i < numSeqs; i += 50) {
+    if (buildProgress.cancelled) {
+      await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS proteins`);
+      await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS mini_motifs`);
+      return { success: false, message: "Build cancelled. Tables have been cleaned up." };
+    }
+
     const batch = [];
     for (let j = i; j < Math.min(i + 50, numSeqs); j++) {
       const lc = locusMatches[j].slice(1, -1).trim();
@@ -256,9 +272,22 @@ export async function buildDatabase(
     }
   }
 
+  // Check cancel before starting minimotifs
+  if (buildProgress.cancelled) {
+    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS proteins`);
+    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS mini_motifs`);
+    return { success: false, message: "Build cancelled. Tables have been cleaned up." };
+  }
+
   // Build miniMotif database
   buildProgress.phase = "minimotifs";
-  await buildMinimotifDatabase();
+  const wasCancelled = await buildMinimotifDatabase();
+
+  if (wasCancelled) {
+    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS proteins`);
+    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS mini_motifs`);
+    return { success: false, message: "Build cancelled. Tables have been cleaned up." };
+  }
 
   buildProgress.phase = "done";
   return {
@@ -271,7 +300,7 @@ export async function buildDatabase(
 // Internal: Build miniMotif database
 // ──────────────────────────────────────────────
 
-async function buildMinimotifDatabase(): Promise<void> {
+async function buildMinimotifDatabase(): Promise<boolean> {
   const proteins = await prisma.$queryRaw<
     {
       protein_sequence: string;
@@ -284,6 +313,8 @@ async function buildMinimotifDatabase(): Promise<void> {
   const totalProteins = proteins.length;
 
   for (let pi = 0; pi < totalProteins; pi++) {
+    if (buildProgress.cancelled) return true;
+
     const protein = proteins[pi];
     const seq = protein.protein_sequence;
     const acc = protein.accession_number;
@@ -366,6 +397,8 @@ async function buildMinimotifDatabase(): Promise<void> {
 
     buildProgress.miniMotifPercent = Math.round(((pi + 1) / totalProteins) * 100);
   }
+
+  return false;
 }
 
 // ──────────────────────────────────────────────
