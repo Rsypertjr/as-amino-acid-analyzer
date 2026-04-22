@@ -299,16 +299,12 @@ async function buildMinimotifDatabase(): Promise<void> {
       end: number;
     }[] = [];
 
-    // Build position index: map each amino acid to its positions in the sequence (single pass)
+    // Build position index: map each amino acid to its sorted positions
     const posIndex = new Map<string, number[]>();
     for (let i = 0; i < seq.length; i++) {
       const ch = seq[i];
-      let arr = posIndex.get(ch);
-      if (!arr) {
-        arr = [];
-        posIndex.set(ch, arr);
-      }
-      arr.push(i);
+      if (!posIndex.has(ch)) posIndex.set(ch, []);
+      posIndex.get(ch)!.push(i);
     }
 
     for (const first of AMINO_CODES) {
@@ -322,20 +318,23 @@ async function buildMinimotifDatabase(): Promise<void> {
         const pattern = `${first}XX${last}`;
 
         for (const fi of firstPositions) {
-          // Find first occurrence of `last` after `fi`
-          // lastPositions is sorted, so binary search for first index > fi
+          // Binary search: find first index in lastPositions strictly after fi
           let lo = 0, hi = lastPositions.length;
           while (lo < hi) {
             const mid = (lo + hi) >> 1;
             if (lastPositions[mid] <= fi) lo = mid + 1;
             else hi = mid;
           }
-          if (lo < lastPositions.length) {
-            const lj = lastPositions[lo];
+          // Emit a motif for every occurrence of `last` after `fi`,
+          // bounded by the length of this accession's sequence
+          for (let k = lo; k < lastPositions.length; k++) {
+            const lj = lastPositions[k];
+            const motifLen = lj - fi + 1;
+            if (motifLen > sqLength) continue;
             motifs.push({
               pattern,
               actual: seq.substring(fi, lj + 1),
-              length: lj - fi + 1,
+              length: motifLen,
               start: fi + 1,
               end: lj + 1,
             });
