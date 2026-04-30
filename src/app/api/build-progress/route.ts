@@ -6,8 +6,12 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   return NextResponse.json({
     proteinRows: buildProgress.proteinRows,
+    proteinTotal: buildProgress.proteinTotal,
+    proteinPercent: buildProgress.proteinPercent,
     miniMotifRows: buildProgress.miniMotifRows,
-    miniMotifPercent: buildProgress.miniMotifPercent,
+    miniMotifProteinsProcessed: buildProgress.miniMotifProteinsProcessed,
+    miniMotifProteinsTotal: buildProgress.miniMotifProteinsTotal,
+    miniMotifEstimatedTotal: buildProgress.miniMotifEstimatedTotal,
     phase: buildProgress.phase,
   });
 }

@@ -2,7 +2,6 @@
 
 import { prisma } from "@/lib/prisma";
 import { buildProgress } from "@/lib/build-progress";
-import { Prisma } from "@prisma/client";
 import path from "path";
 import fs from "fs";
 
@@ -141,7 +140,8 @@ export async function dropTables(): Promise<ActionResult> {
 // ──────────────────────────────────────────────
 
 export async function buildDatabase(
-  fileName: string
+  fileName: string,
+  maxMotifLength: number = 50
 ): Promise<ActionResult> {
   // Validate filename against whitelist to prevent path traversal
   const baseName = path.basename(fileName);
@@ -149,6 +149,13 @@ export async function buildDatabase(
     return {
       success: false,
       message: "Invalid file name. Only approved FASTA files are allowed.",
+    };
+  }
+
+  if (!Number.isInteger(maxMotifLength) || maxMotifLength < 5 || maxMotifLength > 50) {
+    return {
+      success: false,
+      message: "Maximum motif length must be an integer between 5 and 50.",
     };
   }
 
@@ -242,6 +249,7 @@ export async function buildDatabase(
   // Insert proteins in batches of 50
   buildProgress.reset();
   buildProgress.phase = "proteins";
+  buildProgress.proteinTotal = numSeqs;
 
   for (let i = 0; i < numSeqs; i += 50) {
     if (buildProgress.cancelled) {
@@ -267,6 +275,7 @@ export async function buildDatabase(
         VALUES ${batch.join(",\n")}
       `);
       buildProgress.proteinRows = Math.min(i + 50, numSeqs);
+      buildProgress.proteinPercent = Math.round((buildProgress.proteinRows / numSeqs) * 100);
     } catch (e) {
       console.error(`Error batch inserting proteins at ${i}: ${e}`);
     }
@@ -281,7 +290,7 @@ export async function buildDatabase(
 
   // Build miniMotif database
   buildProgress.phase = "minimotifs";
-  const wasCancelled = await buildMinimotifDatabase();
+  const wasCancelled = await buildMinimotifDatabase(maxMotifLength);
 
   if (wasCancelled) {
     await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS proteins`);
@@ -292,7 +301,7 @@ export async function buildDatabase(
   buildProgress.phase = "done";
   return {
     success: true,
-    message: "Protein and MiniMotif Tables are Done Building.",
+    message: `Protein and MiniMotif Tables are Done Building (max motif length ${maxMotifLength}).`,
   };
 }
 
@@ -300,7 +309,7 @@ export async function buildDatabase(
 // Internal: Build miniMotif database
 // ──────────────────────────────────────────────
 
-async function buildMinimotifDatabase(): Promise<boolean> {
+async function buildMinimotifDatabase(maxMotifLength: number): Promise<boolean> {
   const proteins = await prisma.$queryRaw<
     {
       protein_sequence: string;
@@ -311,6 +320,7 @@ async function buildMinimotifDatabase(): Promise<boolean> {
   >`SELECT protein_sequence, accession_number, species_name, protein_length FROM proteins`;
 
   const totalProteins = proteins.length;
+  buildProgress.miniMotifProteinsTotal = totalProteins;
 
   for (let pi = 0; pi < totalProteins; pi++) {
     if (buildProgress.cancelled) return true;
@@ -321,15 +331,6 @@ async function buildMinimotifDatabase(): Promise<boolean> {
     const spName = protein.species_name;
     const sqLength = protein.protein_length;
 
-    // Collect all motifs for this protein, then batch insert
-    const motifs: {
-      pattern: string;
-      actual: string;
-      length: number;
-      start: number;
-      end: number;
-    }[] = [];
-
     // Build position index: map each amino acid to its sorted positions
     const posIndex = new Map<string, number[]>();
     for (let i = 0; i < seq.length; i++) {
@@ -337,6 +338,26 @@ async function buildMinimotifDatabase(): Promise<boolean> {
       if (!posIndex.has(ch)) posIndex.set(ch, []);
       posIndex.get(ch)!.push(i);
     }
+
+    // Stream-insert motifs in chunks of 50000 as they are found,
+    // so rows and progress update continuously without waiting for
+    // the full protein's motif array to be collected first.
+    const CHUNK = 50000;
+    let buffer: string[] = [];
+
+    const flushBuffer = async () => {
+      if (buffer.length === 0) return;
+      const values = buffer.join(",\n");
+      buffer = [];
+      try {
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO mini_motifs (motif_pattern, actual_motif, accession_number, species_name, protein_length, motif_length, start_position, end_position)
+          VALUES ${values}
+        `);
+      } catch (e) {
+        console.error(`Error batch inserting motifs: ${e}`);
+      }
+    };
 
     for (const first of AMINO_CODES) {
       const firstPositions = posIndex.get(first);
@@ -349,53 +370,41 @@ async function buildMinimotifDatabase(): Promise<boolean> {
         const pattern = `${first}XX${last}`;
 
         for (const fi of firstPositions) {
-          // Binary search: find first index in lastPositions strictly after fi
           let lo = 0, hi = lastPositions.length;
           while (lo < hi) {
             const mid = (lo + hi) >> 1;
             if (lastPositions[mid] <= fi) lo = mid + 1;
             else hi = mid;
           }
-          // Emit a motif for every occurrence of `last` after `fi`,
-          // bounded by the length of this accession's sequence
           for (let k = lo; k < lastPositions.length; k++) {
             const lj = lastPositions[k];
             const motifLen = lj - fi + 1;
+            if (motifLen < 5 || motifLen > maxMotifLength) continue;
             if (motifLen > sqLength) continue;
-            motifs.push({
-              pattern,
-              actual: seq.substring(fi, lj + 1),
-              length: motifLen,
-              start: fi + 1,
-              end: lj + 1,
-            });
+            const actual = seq.substring(fi, lj + 1).replace(/'/g, "''");
+            buffer.push(
+              `('${pattern}', '${actual}', '${acc.replace(/'/g, "''")}', '${spName.replace(/'/g, "''")}', ${sqLength}, ${motifLen}, ${fi + 1}, ${lj + 1})`
+            );
+            if (buffer.length >= CHUNK) {
+              await flushBuffer();
+              buildProgress.miniMotifRows += CHUNK;
+              buildProgress.miniMotifEstimatedTotal = Math.round(
+                (buildProgress.miniMotifRows / (pi + 1)) * totalProteins
+              );
+            }
           }
         }
       }
     }
 
-    // Batch insert in chunks of 50000
-    for (let i = 0; i < motifs.length; i += 50000) {
-      const chunk = motifs.slice(i, i + 50000);
-      const values = chunk
-        .map(
-          (m) =>
-            `('${m.pattern}', '${m.actual.replace(/'/g, "''")}', '${acc.replace(/'/g, "''")}', '${spName.replace(/'/g, "''")}', ${sqLength}, ${m.length}, ${m.start}, ${m.end})`
-        )
-        .join(",\n");
-
-      try {
-        await prisma.$executeRawUnsafe(`
-          INSERT INTO mini_motifs (motif_pattern, actual_motif, accession_number, species_name, protein_length, motif_length, start_position, end_position)
-          VALUES ${values}
-        `);
-        buildProgress.miniMotifRows += chunk.length;
-      } catch (e) {
-        console.error(`Error batch inserting motifs: ${e}`);
-      }
-    }
-
-    buildProgress.miniMotifPercent = Math.round(((pi + 1) / totalProteins) * 100);
+    // Flush any remaining motifs
+    const remaining = buffer.length;
+    await flushBuffer();
+    buildProgress.miniMotifRows += remaining;
+    buildProgress.miniMotifEstimatedTotal = Math.round(
+      (buildProgress.miniMotifRows / (pi + 1)) * totalProteins
+    );
+    buildProgress.miniMotifProteinsProcessed = pi + 1;
   }
 
   return false;
@@ -417,7 +426,6 @@ export async function searchMotif(
   if (queryIndex < 0 || queryIndex > 5) {
     return { headers: [], rows: [] };
   }
-
   const motifPattern = `${startMotif}XX${endMotif}`;
 
   const headerSets = [

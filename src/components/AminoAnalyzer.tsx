@@ -102,14 +102,19 @@ export default function AminoAnalyzer({
   }, []);
 
   const handleBuildDatabase = useCallback(
-    async (fileName: string) => {
+    async (fileName: string, maxMotifLength: number) => {
       if (!fileName || !fileName.endsWith(".txt")) {
         alert("Please input a FASTA type file with .txt extension");
         return;
       }
 
+      if (maxMotifLength < 5 || maxMotifLength > 50) {
+        alert("Please select a maximum motif length between 5 and 50.");
+        return;
+      }
+
       setLoading(true);
-      setLoadingMessage("Starting database build...");
+      setLoadingMessage(`Starting database build (max motif length ${maxMotifLength})...`);
       setShowResults(false);
 
       // Start polling for progress via API route
@@ -117,13 +122,23 @@ export default function AminoAnalyzer({
         try {
           const res = await fetch("/api/build-progress");
           const progress = await res.json();
+          const proteinRows = Number(progress.proteinRows ?? 0);
+          const proteinTotal = Number(progress.proteinTotal ?? 0);
+          const proteinPercent = Number(progress.proteinPercent ?? 0);
+          const miniMotifRows = Number(progress.miniMotifRows ?? 0);
+          const miniMotifEstimatedTotal = Number(progress.miniMotifEstimatedTotal ?? 0);
+
           if (progress.phase === "proteins") {
             setLoadingMessage(
-              `Building Protein Table... ${progress.proteinRows.toLocaleString()} rows inserted`
+              `Building Protein Table... ${proteinRows.toLocaleString()} / ${proteinTotal.toLocaleString()} rows inserted (${proteinPercent}%)`
             );
           } else if (progress.phase === "minimotifs") {
+            console.log("Progress: ",progress);
+            const pct = miniMotifEstimatedTotal > 0
+              ? Math.min(99, Math.round((miniMotifRows / miniMotifEstimatedTotal) * 100))
+              : 0;
             setLoadingMessage(
-              `Protein Table complete (${progress.proteinRows.toLocaleString()} rows). Building MiniMotif Table... ${progress.miniMotifRows.toLocaleString()} rows inserted (${progress.miniMotifPercent}%)`
+              `Protein Table complete (${proteinRows.toLocaleString()} rows). Building MiniMotif Table... ${miniMotifRows.toLocaleString()} rows inserted (~${pct}% complete)`
             );
           }
         } catch {
@@ -135,7 +150,7 @@ export default function AminoAnalyzer({
       const res = await fetch("/api/build-database", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileName }),
+        body: JSON.stringify({ fileName, maxMotifLength }),
       });
       const result = await res.json();
 
@@ -179,7 +194,7 @@ export default function AminoAnalyzer({
       checkDatabaseStatus(),
       checkMiniMotifSize(),
     ]);
-
+    console.log("Status: ",status);
     setStatusMessage(status.message);
     setNumRows(size.numRows ?? 0);
     setDropConfirm(!status.proteinExists && !status.miniMotifExists);
@@ -321,6 +336,7 @@ export default function AminoAnalyzer({
               {motifAnalytic}
             </span>
           </p>
+
         </div>
 
         {numRows > 0 && (
@@ -350,7 +366,7 @@ function FileInputForm({
   loading,
   cancelling,
 }: {
-  onBuild: (fileName: string) => void;
+  onBuild: (fileName: string, maxMotifLength: number) => void;
   onDrop: () => void;
   onUpdate: () => void;
   onCancel: () => void;
@@ -358,6 +374,7 @@ function FileInputForm({
   cancelling: boolean;
 }) {
   const [fileName, setFileName] = useState("");
+  const [maxMotifLength, setMaxMotifLength] = useState(50);
 
   return (
     <div>
@@ -369,23 +386,40 @@ function FileInputForm({
         placeholder="Input File Name"
         className="w-full border border-gray-300 rounded-lg px-4 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-400"
       />
+      <div className="mb-3">
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Maximum Motif Length for Build (5-50)
+        </label>
+        <select
+          value={maxMotifLength}
+          onChange={(e) => setMaxMotifLength(Number(e.target.value))}
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+        >
+          {Array.from({ length: 46 }, (_, i) => i + 5).map((len) => (
+            <option key={len} value={len}>
+              {len}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <div className="flex flex-wrap gap-2">
         <button
-          onClick={() => onBuild(fileName)}
+          onClick={() => onBuild(fileName, maxMotifLength)}
           disabled={loading}
           className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
         >
           Verify File and Start Database Build
         </button>
         <button
-          onClick={onDrop}
+          onClick={() => onDrop()}
           disabled={loading}
           className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
         >
           Drop Tables
         </button>
         <button
-          onClick={onUpdate}
+          onClick={() => onUpdate()}
           disabled={loading}
           className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
         >
